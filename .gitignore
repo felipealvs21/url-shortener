@@ -1,0 +1,15 @@
+# Variáveis de ambiente (segredos locais); o exemplo versionado continua rastreado
+.env
+.env.*
+!.env.example
+
+# Binários de build
+/bin/
+
+# Artefatos de teste e cobertura do Go
+*.test
+*.out
+coverage.html
+
+# Arquivos de sistema
+.DS_Store
