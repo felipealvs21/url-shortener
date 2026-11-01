@@ -15,6 +15,7 @@ import (
 
 	"github.com/felipealvs21/url-shortener/internal/config"
 	"github.com/felipealvs21/url-shortener/internal/health"
+	"github.com/felipealvs21/url-shortener/internal/postgres"
 )
 
 // Server timeouts do not change between environments, so they are constants
@@ -60,8 +61,23 @@ func run(ctx context.Context, logger *slog.Logger, level *slog.LevelVar, getenv 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Opened after NotifyContext so that Ctrl+C while waiting for the database
+	// cancels the startup. If the database is down, we fail here, before any
+	// port is opened (a project decision: fail fast).
+	pool, err := postgres.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	// Deferred calls run when run returns, which is after srv.Shutdown has
+	// waited for the in-flight requests (they may still be using the database).
+	// So the pool is closed last, never under a running request.
+	defer pool.Close()
+	// Only host and database: never the user, the password or the full URL.
+	connConfig := pool.Config().ConnConfig
+	logger.Info("database connected", "host", connConfig.Host, "database", connConfig.Database)
+
 	srv := &http.Server{
-		Handler:           newRouter(),
+		Handler:           newRouter(pool, logger),
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
@@ -115,9 +131,10 @@ func run(ctx context.Context, logger *slog.Logger, level *slog.LevelVar, getenv 
 
 // newRouter is separate from run so the route table can be tested without
 // starting a server.
-func newRouter() *http.ServeMux {
+func newRouter(db health.Pinger, logger *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
 	// The "GET " prefix makes the mux answer 405 + Allow for other methods.
 	mux.HandleFunc("GET /healthz", health.Liveness)
+	mux.HandleFunc("GET /readyz", health.Readiness(db, logger))
 	return mux
 }

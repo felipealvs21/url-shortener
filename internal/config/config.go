@@ -4,10 +4,10 @@
 // development the Makefile loads .env and exports it, so the application sees
 // the same variables it would see in any other environment.
 //
-// Only what changes between environments belongs here. Future secrets (such as
-// a database password) must never be logged, not even on a validation error:
-// Load's error messages quote the received value, which is fine only because
-// the current settings are not secret.
+// Only what changes between environments belongs here. Secrets (today only
+// DATABASE_URL, which carries the database password) must never be logged, not
+// even on a validation error: Load's error messages quote the received value of
+// the non-secret variables, but never the value of a secret one.
 package config
 
 import (
@@ -33,10 +33,14 @@ type Config struct {
 	LogLevel slog.Level
 	// ShutdownTimeout is how long in-flight requests get to finish on shutdown.
 	ShutdownTimeout time.Duration
+	// DatabaseURL is the PostgreSQL connection URL. It is a SECRET (it contains
+	// the password): never log it, and never log the whole Config struct.
+	DatabaseURL string
 }
 
-// Load builds a Config from the variables HTTP_ADDR, LOG_LEVEL and
-// SHUTDOWN_TIMEOUT, using defaults for the ones that are unset or blank.
+// Load builds a Config from the variables HTTP_ADDR, LOG_LEVEL,
+// SHUTDOWN_TIMEOUT and DATABASE_URL. The first three fall back to defaults when
+// unset or blank; DATABASE_URL is required and has no default.
 //
 // It takes getenv as a parameter instead of calling os.Getenv so tests can
 // pass a map and never touch (or depend on) the real process environment.
@@ -75,6 +79,15 @@ func Load(getenv func(string) string) (Config, error) {
 		} else {
 			cfg.ShutdownTimeout = d
 		}
+	}
+
+	// Only the presence of DATABASE_URL is checked here. Parsing it is the job
+	// of internal/postgres, which owns the pgx dependency; config stays free of
+	// it. The value is never put in an error message because it is a secret.
+	if v := strings.TrimSpace(getenv("DATABASE_URL")); v != "" {
+		cfg.DatabaseURL = v
+	} else {
+		errs = append(errs, errors.New("DATABASE_URL is required, e.g. postgres://user:password@host:5432/dbname"))
 	}
 
 	if err := errors.Join(errs...); err != nil {

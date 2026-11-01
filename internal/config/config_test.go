@@ -12,6 +12,21 @@ func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
+// testURL is a fake DATABASE_URL. It contains a recognizable password so tests
+// can check that it never leaks into error messages.
+const testURL = "postgres://user:s3cr3t@127.0.0.1:5432/db"
+
+// withURL returns a copy of m that has DATABASE_URL set to testURL, unless m
+// already sets it. DATABASE_URL is required, so tests about the other
+// variables need a valid one to isolate what they check.
+func withURL(m map[string]string) map[string]string {
+	out := map[string]string{"DATABASE_URL": testURL}
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
 func TestLoad(t *testing.T) {
 	tests := []struct {
 		name string
@@ -19,7 +34,7 @@ func TestLoad(t *testing.T) {
 		want Config
 	}{
 		{
-			name: "defaults when nothing is set",
+			name: "defaults when only DATABASE_URL is set",
 			env:  nil,
 			want: Config{HTTPAddr: "127.0.0.1:8080", LogLevel: slog.LevelInfo, ShutdownTimeout: 10 * time.Second},
 		},
@@ -37,6 +52,11 @@ func TestLoad(t *testing.T) {
 			name: "values are trimmed",
 			env:  map[string]string{"HTTP_ADDR": " :8081 ", "LOG_LEVEL": " warn ", "SHUTDOWN_TIMEOUT": " 5s "},
 			want: Config{HTTPAddr: ":8081", LogLevel: slog.LevelWarn, ShutdownTimeout: 5 * time.Second},
+		},
+		{
+			name: "DATABASE_URL is trimmed",
+			env:  map[string]string{"DATABASE_URL": "  postgres://u:p@h:5432/d\t"},
+			want: Config{HTTPAddr: "127.0.0.1:8080", LogLevel: slog.LevelInfo, ShutdownTimeout: 10 * time.Second, DatabaseURL: "postgres://u:p@h:5432/d"},
 		},
 		{
 			name: "smallest valid port",
@@ -63,9 +83,12 @@ func TestLoad(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Load(env(tt.env))
+			got, err := Load(env(withURL(tt.env)))
 			if err != nil {
 				t.Fatalf("Load() error = %v", err)
+			}
+			if tt.want.DatabaseURL == "" {
+				tt.want.DatabaseURL = testURL
 			}
 			if got != tt.want {
 				t.Errorf("Load() = %+v, want %+v", got, tt.want)
@@ -109,7 +132,7 @@ func TestLoadInvalid(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Load(env(tt.env))
+			got, err := Load(env(withURL(tt.env)))
 			if err == nil {
 				t.Fatalf("Load() = %+v, want an error", got)
 			}
@@ -122,5 +145,63 @@ func TestLoadInvalid(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLoadDatabaseURLRequired(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+	}{
+		{name: "absent", env: nil},
+		{name: "empty", env: map[string]string{"DATABASE_URL": ""}},
+		{name: "blank", env: map[string]string{"DATABASE_URL": "  \t "}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Load(env(tt.env))
+			if err == nil {
+				t.Fatalf("Load() = %+v, want an error", got)
+			}
+			if got != (Config{}) {
+				t.Errorf("Load() config = %+v, want the zero Config on error", got)
+			}
+			if !strings.Contains(err.Error(), "DATABASE_URL is required") {
+				t.Errorf("error %q does not mention that DATABASE_URL is required", err)
+			}
+		})
+	}
+}
+
+func TestLoadMissingURLIsReportedWithOtherProblems(t *testing.T) {
+	_, err := Load(env(map[string]string{"LOG_LEVEL": "verbose"}))
+	if err == nil {
+		t.Fatal("Load() error = nil, want an error")
+	}
+	for _, w := range []string{"LOG_LEVEL", "DATABASE_URL"} {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("error %q does not contain %q", err, w)
+		}
+	}
+}
+
+// DATABASE_URL carries the password. Errors about other variables must not
+// leak it.
+func TestLoadErrorsDoNotLeakDatabaseURL(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		"DATABASE_URL":     testURL,
+		"HTTP_ADDR":        "semporta",
+		"LOG_LEVEL":        "verbose",
+		"SHUTDOWN_TIMEOUT": "abc",
+	}))
+	if err == nil {
+		t.Fatal("Load() error = nil, want an error")
+	}
+	if strings.Contains(err.Error(), "s3cr3t") || strings.Contains(err.Error(), testURL) {
+		t.Errorf("error leaks the DATABASE_URL value: %q", err)
+	}
+	if strings.Contains(err.Error(), "DATABASE_URL") {
+		t.Errorf("error mentions DATABASE_URL although it is valid: %q", err)
 	}
 }
