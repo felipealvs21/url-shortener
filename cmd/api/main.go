@@ -13,24 +13,27 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/felipealvs21/url-shortener/internal/config"
 	"github.com/felipealvs21/url-shortener/internal/health"
 )
 
-// Hardcoded for now; task 1.4 replaces them with external configuration.
+// Server timeouts do not change between environments, so they are constants
+// rather than configuration.
 const (
-	// localhost (not ":8080") so the server is not exposed to the local network.
-	addr              = "localhost:8080"
 	readHeaderTimeout = 5 * time.Second
 	readTimeout       = 10 * time.Second
 	writeTimeout      = 10 * time.Second
 	idleTimeout       = 60 * time.Second
-	shutdownTimeout   = 10 * time.Second
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// The logger must exist before the configuration is loaded (so that config
+	// errors can be logged), but the configuration is what defines the log
+	// level. A LevelVar breaks the cycle: the level is adjusted after Load.
+	var level slog.LevelVar // starts at Info
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: &level}))
 
-	if err := run(context.Background(), logger); err != nil {
+	if err := run(context.Background(), logger, &level, os.Getenv); err != nil {
 		logger.Error("server failed", "error", err)
 		os.Exit(1)
 	}
@@ -39,7 +42,20 @@ func main() {
 // run starts the server and blocks until it fails or a shutdown signal arrives.
 // Keeping the logic out of main lets it return errors instead of calling os.Exit
 // in the middle, so deferred calls (like stop) always run.
-func run(ctx context.Context, logger *slog.Logger) error {
+func run(ctx context.Context, logger *slog.Logger, level *slog.LevelVar, getenv func(string) string) error {
+	// Configuration comes first: an invalid one must fail before any signal
+	// handler is installed or any port is opened.
+	cfg, err := config.Load(getenv)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	level.Set(cfg.LogLevel)
+	logger.Info("config loaded",
+		"addr", cfg.HTTPAddr,
+		"log_level", cfg.LogLevel.String(),
+		"shutdown_timeout", cfg.ShutdownTimeout.String(),
+	)
+
 	// ctx is cancelled when SIGINT (Ctrl+C) or SIGTERM (e.g. docker stop) arrives.
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -56,9 +72,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// Bind synchronously: if the port is taken we fail right here, and we only
 	// log "listening" once it is really true.
-	ln, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
-		return fmt.Errorf("listen on %s: %w", addr, err)
+		return fmt.Errorf("listen on %s: %w", cfg.HTTPAddr, err)
 	}
 	logger.Info("server listening", "addr", ln.Addr().String())
 
@@ -86,7 +102,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// A fresh context is needed: ctx is already cancelled, and Shutdown would
 	// give up instantly with it.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 
 	// Shutdown closes the listener and waits for in-flight requests to finish.
