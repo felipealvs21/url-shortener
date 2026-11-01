@@ -1,0 +1,33 @@
+name: url-shortener
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      # ":?" makes Compose fail fast if a variable is missing, instead of
+      # silently starting a database with an empty or default credential.
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    ports:
+      # Bind to loopback only: without 127.0.0.1, Docker publishes the port on
+      # all interfaces and exposes the database to the local network.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # The postgres:18 image declares VOLUME /var/lib/postgresql and keeps the
+      # data in a versioned subdirectory (PGDATA=/var/lib/postgresql/18/docker).
+      # Mounting the parent, as the image expects, keeps future major-version
+      # upgrades possible. Mounting the old /var/lib/postgresql/data (common in
+      # examples for <= 17) makes the 18 image refuse to start (exit 1).
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      # "$$" escapes Compose interpolation, so the variable is expanded by the
+      # shell inside the container (where it is set), not by Compose on the host.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pgdata:
